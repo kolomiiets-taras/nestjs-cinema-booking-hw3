@@ -1,12 +1,15 @@
 ### Cinema Booking API — перевірка всіх маршрутів і помилок.
 ### Виконувати запити згори вниз (VS Code, розширення REST Client) на запущеному сервері
-### після `docker compose up -d` і `npm run migration:run`.
+### після `docker compose up -d` (MongoDB) і `npm run start:dev`.
 ### Ідентифікатори підставляються зі змінних — нічого копіювати вручну не потрібно.
 ### Назви залів містять {{$timestamp}}, тож файл можна проганяти повторно на тій самій базі.
 ### Кожна помилка повертається в єдиному форматі: { statusCode, message, path, timestamp }.
+### Усі ідентифікатори — ObjectId (24 шістнадцяткові символи). Інший формат дає 400 з поясненням
+### ще до звернення до бази; коректний за формою id неіснуючого документа дає 404.
 
 @baseUrl = http://localhost:3000
-@missingId = 00000000-0000-4000-8000-000000000000
+@missingId = 000000000000000000000000
+@badId = not-an-object-id
 @day = 2030-05-10
 
 ########## ФІЛЬМИ ##########
@@ -61,8 +64,11 @@ GET {{baseUrl}}/films/{{film.response.body.$.id}}
 ### Неіснуючий фільм -> 404
 GET {{baseUrl}}/films/{{missingId}}
 
-### id не є UUID -> 400
-GET {{baseUrl}}/films/not-a-uuid
+### id не є ObjectId -> 400 з поясненням формату
+GET {{baseUrl}}/films/{{badId}}
+
+### id з 12 символів (не 24 шістнадцяткові) -> 400
+GET {{baseUrl}}/films/abcdefghijkl
 
 ### Оновити частину полів -> 200
 PATCH {{baseUrl}}/films/{{film.response.body.$.id}}
@@ -82,6 +88,14 @@ Content-Type: application/json
 
 ### Оновлення неіснуючого фільму -> 404
 PATCH {{baseUrl}}/films/{{missingId}}
+Content-Type: application/json
+
+{
+  "title": "Nobody"
+}
+
+### Оновлення з id не у форматі ObjectId -> 400
+PATCH {{baseUrl}}/films/{{badId}}
 Content-Type: application/json
 
 {
@@ -120,7 +134,17 @@ Content-Type: application/json
   "seatsPerRow": 2
 }
 
-### Кількість рядів не ціле додатне -> 400
+### Поле не того типу -> 400
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "Broken Hall",
+  "rows": "three",
+  "seatsPerRow": 5
+}
+
+### Кількість рядів і місць не ціле додатне -> 400
 POST {{baseUrl}}/halls
 Content-Type: application/json
 
@@ -138,6 +162,9 @@ GET {{baseUrl}}/halls/{{hall.response.body.$.id}}
 
 ### Неіснуючий зал -> 404
 GET {{baseUrl}}/halls/{{missingId}}
+
+### id залу не є ObjectId -> 400
+GET {{baseUrl}}/halls/{{badId}}
 
 ########## СЕАНСИ ##########
 
@@ -231,6 +258,28 @@ Content-Type: application/json
   "price": -100
 }
 
+### price дробове -> 400
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{film.response.body.$.id}}",
+  "hallId": "{{hall.response.body.$.id}}",
+  "startsAt": "{{day}}T20:00:00Z",
+  "price": 125.5
+}
+
+### filmId і hallId не у форматі ObjectId -> 400 (до звернення до бази)
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{badId}}",
+  "hallId": "12345",
+  "startsAt": "{{day}}T20:00:00Z",
+  "price": 12500
+}
+
 ### Розклад: перша сторінка за зростанням startsAt -> 200, { items, total, page: 1, limit: 20 }
 GET {{baseUrl}}/showings
 
@@ -279,17 +328,29 @@ GET {{baseUrl}}/showings?limit=2.5
 ### sort не asc/desc -> 400
 GET {{baseUrl}}/showings?sort=newest
 
+### filmId не у форматі ObjectId -> 400
+GET {{baseUrl}}/showings?filmId={{badId}}
+
+### filmId неіснуючого фільму -> 200, items порожній, total 0
+GET {{baseUrl}}/showings?filmId={{missingId}}
+
 ### Сеанс за id з назвами фільму й залу -> 200
 GET {{baseUrl}}/showings/{{showing.response.body.$.id}}
 
 ### Неіснуючий сеанс -> 404
 GET {{baseUrl}}/showings/{{missingId}}
 
+### id сеансу не є ObjectId -> 400
+GET {{baseUrl}}/showings/{{badId}}
+
 ### Карта місць сеансу (усі вільні) -> 200
 GET {{baseUrl}}/showings/{{showing.response.body.$.id}}/seats
 
 ### Карта місць неіснуючого сеансу -> 404
 GET {{baseUrl}}/showings/{{missingId}}/seats
+
+### Карта місць: id не є ObjectId -> 400
+GET {{baseUrl}}/showings/{{badId}}/seats
 
 ########## БРОНЮВАННЯ ##########
 
@@ -313,6 +374,14 @@ Content-Type: application/json
   "seats": [{ "row": 1, "seat": 1 }]
 }
 
+### id сеансу не є ObjectId -> 400
+POST {{baseUrl}}/showings/{{badId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 1, "seat": 1 }]
+}
+
 ### Порожній масив місць -> 400
 POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
 Content-Type: application/json
@@ -329,6 +398,12 @@ Content-Type: application/json
   "seats": [{ "row": 1 }]
 }
 
+### Масив seats відсутній -> 400
+POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+Content-Type: application/json
+
+{}
+
 ### Місце повторюється в масиві -> 400
 POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
 Content-Type: application/json
@@ -340,12 +415,20 @@ Content-Type: application/json
   ]
 }
 
-### Місця немає в залі (ряд 9 у залі з 3 рядів) -> 400
+### Місця немає в залі: ряд 9 у залі з 3 рядів -> 400 (не 409)
 POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
 Content-Type: application/json
 
 {
   "seats": [{ "row": 9, "seat": 1 }]
+}
+
+### Місця немає в залі: місце 6 у ряду з 5 місць -> 400 (не 409)
+POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 1, "seat": 6 }]
 }
 
 ### Номер місця не ціле додатне -> 400
@@ -356,7 +439,23 @@ Content-Type: application/json
   "seats": [{ "row": 1, "seat": 0 }]
 }
 
-### Одне з місць уже зайняте -> 409, місце 1-1 НЕ бронюється (транзакція відкочується)
+### Номер ряду дробовий -> 400
+POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 1.5, "seat": 1 }]
+}
+
+### Місце вже зайняте -> 409
+POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 2, "seat": 3 }]
+}
+
+### Одне з місць уже зайняте -> 409, місце 1-1 теж НЕ бронюється (документ сеансу не змінюється)
 POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
 Content-Type: application/json
 
@@ -379,19 +478,31 @@ GET {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
 ### Бронювання неіснуючого сеансу -> 404
 GET {{baseUrl}}/showings/{{missingId}}/bookings
 
+### Бронювання сеансу: id не є ObjectId -> 400
+GET {{baseUrl}}/showings/{{badId}}/bookings
+
 ########## ВИДАЛЕННЯ ##########
 
-### Видалити фільм, для якого є сеанси -> 409 з поясненням (каскаду немає)
+### Видалити фільм, для якого є сеанси -> 409 з поясненням (сервіс перевіряє сеанси запитом)
 DELETE {{baseUrl}}/films/{{film.response.body.$.id}}
 
-### Видалити зал, у якому є сеанси -> 409 з поясненням (каскаду немає)
+### Видалити зал, у якому є сеанси -> 409 з поясненням (сервіс перевіряє сеанси запитом)
 DELETE {{baseUrl}}/halls/{{hall.response.body.$.id}}
 
-### Скасувати бронювання -> 204, рядки booking_seats видаляються каскадно
+### Скасувати бронювання -> 204: одне оновлення звільняє місця й видаляє запис з масиву bookings
 DELETE {{baseUrl}}/bookings/{{booking.response.body.$.id}}
 
 ### Повторне скасування -> 404
 DELETE {{baseUrl}}/bookings/{{booking.response.body.$.id}}
+
+### Скасування неіснуючого бронювання -> 404
+DELETE {{baseUrl}}/bookings/{{missingId}}
+
+### id бронювання не є ObjectId -> 400
+DELETE {{baseUrl}}/bookings/{{badId}}
+
+### Бронювання сеансу після скасування -> 200, порожній масив
+GET {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
 
 ### Карта місць: усі вільні -> 200
 GET {{baseUrl}}/showings/{{showing.response.body.$.id}}/seats
@@ -409,6 +520,12 @@ DELETE {{baseUrl}}/films/{{missingId}}
 
 ### Видалити неіснуючий зал -> 404
 DELETE {{baseUrl}}/halls/{{missingId}}
+
+### Видалити фільм: id не є ObjectId -> 400
+DELETE {{baseUrl}}/films/{{badId}}
+
+### Видалити зал: id не є ObjectId -> 400
+DELETE {{baseUrl}}/halls/{{badId}}
 
 ### Тимчасовий фільм без сеансів -> 201
 # @name tempFilm

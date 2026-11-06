@@ -1,5 +1,7 @@
 services:
   mongodb:
+    # Standalone server, no replica set: the app needs no transactions.
+    # mongo:8.x does not start on Linux kernels 6.19+ (MongoDB SERVER-121912).
     image: mongo:7
     restart: unless-stopped
     ports:

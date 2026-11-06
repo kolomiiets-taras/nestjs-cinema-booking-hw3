@@ -90,6 +90,7 @@ describe('Cinema booking API (e2e)', () => {
           },
         },
       },
+      { $project: { _id: 0 } },
     ]);
     return row ?? { bookings: 0, bookedSeats: 0 };
   };
