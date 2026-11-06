@@ -1,9 +1,9 @@
 import { plainToInstance } from 'class-transformer';
 import {
   IsEnum,
-  IsNotEmpty,
   IsNumber,
   IsString,
+  Matches,
   Max,
   Min,
   validateSync,
@@ -24,30 +24,17 @@ export class EnvironmentVariables {
   @IsEnum(NodeEnvironment)
   NODE_ENV: NodeEnvironment;
 
+  /** e.g. mongodb://user:password@localhost:27017/cinema?authSource=admin */
   @IsString()
-  @IsNotEmpty()
-  POSTGRES_HOST: string;
-
-  @IsNumber()
-  @Min(1)
-  @Max(65535)
-  POSTGRES_PORT: number;
-
-  @IsString()
-  @IsNotEmpty()
-  POSTGRES_USER: string;
-
-  @IsString()
-  @IsNotEmpty()
-  POSTGRES_PASSWORD: string;
-
-  @IsString()
-  @IsNotEmpty()
-  POSTGRES_DB: string;
+  @Matches(/^mongodb(\+srv)?:\/\/\S+$/, {
+    message:
+      'MONGODB_URI must be a MongoDB connection string (mongodb://... or mongodb+srv://...)',
+  })
+  MONGODB_URI: string;
 }
 
 /**
- * Called by ConfigModule on startup (and by the TypeORM CLI data source):
+ * Called by ConfigModule on startup (the seed script boots the same module):
  * the application does not start when a variable is missing or invalid.
  */
 export function validate(

@@ -1,13 +1,26 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsISO8601, IsInt, IsPositive, IsUUID, Max } from 'class-validator';
+import { IsISO8601, IsInt, IsMongoId, IsPositive, Max } from 'class-validator';
+import {
+  OBJECT_ID_EXAMPLE,
+  OBJECT_ID_FORMAT_HINT,
+  OBJECT_ID_PATTERN,
+} from '../../common/object-id';
 
 export class CreateShowingDto {
-  @ApiProperty({ format: 'uuid', description: 'id наявного фільму' })
-  @IsUUID()
+  @ApiProperty({
+    example: OBJECT_ID_EXAMPLE,
+    pattern: OBJECT_ID_PATTERN.source,
+    description: 'ObjectId наявного фільму',
+  })
+  @IsMongoId({ message: `filmId: ${OBJECT_ID_FORMAT_HINT}` })
   filmId: string;
 
-  @ApiProperty({ format: 'uuid', description: 'id наявного залу' })
-  @IsUUID()
+  @ApiProperty({
+    example: OBJECT_ID_EXAMPLE,
+    pattern: OBJECT_ID_PATTERN.source,
+    description: 'ObjectId наявного залу',
+  })
+  @IsMongoId({ message: `hallId: ${OBJECT_ID_FORMAT_HINT}` })
   hallId: string;
 
   @ApiProperty({

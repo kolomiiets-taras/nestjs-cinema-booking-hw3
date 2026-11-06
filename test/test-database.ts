@@ -1,63 +1,28 @@
 import { config } from 'dotenv';
-import { join } from 'node:path';
-import { DataSource } from 'typeorm';
+import mongoose from 'mongoose';
 
 /**
- * e2e tests never touch the development database: they use separate databases
- * on the same PostgreSQL server, named after POSTGRES_DB from .env.
+ * e2e tests never touch the development database: they use a separate
+ * database `<db>_test` on the same MongoDB server, derived from MONGODB_URI in .env.
  */
 config({ quiet: true });
 
-const required = (name: string): string => {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} is not set (copy .env.example to .env)`);
-  }
-  return value;
-};
+const devUri = process.env.MONGODB_URI;
+if (!devUri) {
+  throw new Error('MONGODB_URI is not set (copy .env.example to .env)');
+}
 
-export const DEV_DB = required('POSTGRES_DB').replace(/_test$/, '');
-export const TEST_DB = `${DEV_DB}_test`;
-export const MIGRATIONS_TEST_DB = `${DEV_DB}_migrations_test`;
+const url = new URL(devUri);
+const devDb = url.pathname.replace(/^\//, '').replace(/_test$/, '') || 'test';
+url.pathname = `/${devDb}_test`;
 
-const connection = () => ({
-  type: 'postgres' as const,
-  host: required('POSTGRES_HOST'),
-  port: Number(required('POSTGRES_PORT')),
-  username: required('POSTGRES_USER'),
-  password: required('POSTGRES_PASSWORD'),
-});
+export const TEST_DB_URI = url.toString();
 
-/** Runs statements on the maintenance database "postgres" of the same server. */
-async function onServer(...statements: string[]): Promise<void> {
-  const server = new DataSource({ ...connection(), database: 'postgres' });
-  await server.initialize();
+export async function dropTestDatabase(): Promise<void> {
+  const connection = await mongoose.createConnection(TEST_DB_URI).asPromise();
   try {
-    for (const statement of statements) {
-      await server.query(statement);
-    }
+    await connection.dropDatabase();
   } finally {
-    await server.destroy();
+    await connection.close();
   }
-}
-
-export function recreateDatabase(name: string): Promise<void> {
-  return onServer(
-    `DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`,
-    `CREATE DATABASE "${name}"`,
-  );
-}
-
-export function dropDatabase(name: string): Promise<void> {
-  return onServer(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
-}
-
-/** Data source with the project migrations only — the schema comes from them, not from entities. */
-export function migrationsDataSource(database: string): DataSource {
-  return new DataSource({
-    ...connection(),
-    uuidExtension: 'pgcrypto',
-    database,
-    migrations: [join(__dirname, '..', 'src', 'migrations', '*.ts')],
-  });
 }

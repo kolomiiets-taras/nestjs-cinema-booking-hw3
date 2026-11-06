@@ -1,12 +1,15 @@
 import { Module, forwardRef } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
+import { MongooseModule } from '@nestjs/mongoose';
 import { ShowingsModule } from '../showings/showings.module';
-import { Film } from './entities/film.entity';
 import { FilmsController } from './films.controller';
 import { FilmsService } from './films.service';
+import { Film, FilmSchema } from './schemas/film.schema';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Film]), forwardRef(() => ShowingsModule)],
+  imports: [
+    MongooseModule.forFeature([{ name: Film.name, schema: FilmSchema }]),
+    forwardRef(() => ShowingsModule),
+  ],
   controllers: [FilmsController],
   providers: [FilmsService],
   exports: [FilmsService],

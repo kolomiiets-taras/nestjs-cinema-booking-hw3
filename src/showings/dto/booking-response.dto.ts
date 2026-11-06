@@ -1,15 +1,26 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { Seat } from '../../halls/dto/hall-with-seats.dto';
+import { Types } from 'mongoose';
+import { OBJECT_ID_EXAMPLE, OBJECT_ID_PATTERN } from '../../common/object-id';
+import { SeatPositionDto } from '../../halls/dto/hall-response.dto';
+import { Booking } from '../schemas/booking.schema';
 
 export class BookingResponseDto {
-  @ApiProperty({ format: 'uuid' })
+  @ApiProperty({
+    example: OBJECT_ID_EXAMPLE,
+    pattern: OBJECT_ID_PATTERN.source,
+    description: 'ObjectId бронювання рядком',
+  })
   id: string;
 
-  @ApiProperty({ format: 'uuid' })
+  @ApiProperty({
+    example: OBJECT_ID_EXAMPLE,
+    pattern: OBJECT_ID_PATTERN.source,
+    description: 'ObjectId сеансу, у документі якого лежить бронювання',
+  })
   showingId: string;
 
-  @ApiProperty({ type: [Seat] })
-  seats: Seat[];
+  @ApiProperty({ type: [SeatPositionDto] })
+  seats: SeatPositionDto[];
 
   @ApiProperty({
     example: 25000,
@@ -19,4 +30,14 @@ export class BookingResponseDto {
 
   @ApiProperty({ example: '2026-11-25T18:00:00.000Z' })
   createdAt: string;
+
+  static from(booking: Booking, showingId: Types.ObjectId): BookingResponseDto {
+    return Object.assign(new BookingResponseDto(), {
+      id: booking._id.toHexString(),
+      showingId: showingId.toHexString(),
+      seats: booking.seats.map(({ row, seat }) => ({ row, seat })),
+      totalPrice: booking.totalPrice,
+      createdAt: booking.createdAt.toISOString(),
+    });
+  }
 }

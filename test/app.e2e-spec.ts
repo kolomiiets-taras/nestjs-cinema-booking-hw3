@@ -1,13 +1,19 @@
 import { INestApplication } from '@nestjs/common';
+import { getModelToken } from '@nestjs/mongoose';
 import { Test } from '@nestjs/testing';
+import { Model, Types } from 'mongoose';
 import request, { Response } from 'supertest';
 import { App } from 'supertest/types';
-import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import { Film } from '../src/films/schemas/film.schema';
+import { Hall } from '../src/halls/schemas/hall.schema';
 import { setupApp } from '../src/setup-app';
+import { Showing } from '../src/showings/schemas/showing.schema';
 
 const FUTURE = '2030-05-10';
-const MISSING_ID = '00000000-0000-4000-8000-000000000000';
+// Well-formed ObjectId that belongs to no document.
+const MISSING_ID = '000000000000000000000000';
+const OBJECT_ID = /^[0-9a-f]{24}$/;
 
 interface Entity {
   id: string;
@@ -48,7 +54,7 @@ const ids = (res: Response): string[] =>
 
 describe('Cinema booking API (e2e)', () => {
   let app: INestApplication<App>;
-  let dataSource: DataSource;
+  let showingModel: Model<Showing>;
   let http: () => ReturnType<typeof request>;
 
   let filmId: string;
@@ -59,11 +65,33 @@ describe('Cinema booking API (e2e)', () => {
   let showingC: string;
   let bookingId: string;
 
-  const count = async (table: string): Promise<number> => {
-    const [row] = await dataSource.query<{ count: string }[]>(
-      `SELECT COUNT(*) AS count FROM "${table}"`,
-    );
-    return Number(row.count);
+  /** Bookings and occupied seats across all showing documents, read from the database. */
+  const stored = async (): Promise<{
+    bookings: number;
+    bookedSeats: number;
+  }> => {
+    const [row] = await showingModel.aggregate<{
+      bookings: number;
+      bookedSeats: number;
+    }>([
+      {
+        $group: {
+          _id: null,
+          bookings: { $sum: { $size: '$bookings' } },
+          bookedSeats: {
+            $sum: {
+              $size: {
+                $filter: {
+                  input: '$seats',
+                  cond: { $ne: ['$$this.bookingId', null] },
+                },
+              },
+            },
+          },
+        },
+      },
+    ]);
+    return row ?? { bookings: 0, bookedSeats: 0 };
   };
 
   beforeAll(async () => {
@@ -73,10 +101,14 @@ describe('Cinema booking API (e2e)', () => {
     app = moduleRef.createNestApplication();
     setupApp(app);
     await app.init();
-    dataSource = app.get(DataSource);
-    await dataSource.query(
-      'TRUNCATE booking_seats, bookings, showings, halls, films',
-    );
+    showingModel = app.get<Model<Showing>>(getModelToken(Showing.name));
+    const models: Model<any>[] = [
+      app.get<Model<Film>>(getModelToken(Film.name)),
+      app.get<Model<Hall>>(getModelToken(Hall.name)),
+      showingModel,
+    ];
+    // The test database is empty; wait until the schema indexes (unique hall name) are built.
+    await Promise.all(models.map((model) => model.init()));
     http = () => request(app.getHttpServer());
   });
 
@@ -91,11 +123,13 @@ describe('Cinema booking API (e2e)', () => {
         .send({ title: 'Dune', durationMinutes: 166, releaseYear: 2024 })
         .expect(201);
       expect(res.body).toEqual({
-        id: expect.any(String) as string,
+        id: expect.stringMatching(OBJECT_ID) as string,
         title: 'Dune',
         durationMinutes: 166,
         releaseYear: 2024,
       });
+      expect(res.body).not.toHaveProperty('_id');
+      expect(res.body).not.toHaveProperty('__v');
       filmId = body<Entity>(res).id;
 
       const other = await http()
@@ -135,6 +169,12 @@ describe('Cinema booking API (e2e)', () => {
     it('GET /films, GET /films/:id, 404', async () => {
       const list = await http().get('/films').expect(200);
       expect(list.body).toHaveLength(2);
+      expect(Object.keys(body<object[]>(list)[0]).sort()).toEqual([
+        'durationMinutes',
+        'id',
+        'releaseYear',
+        'title',
+      ]);
       await http().get(`/films/${filmId}`).expect(200);
       await http().get(`/films/${MISSING_ID}`).expect(404);
     });
@@ -153,11 +193,18 @@ describe('Cinema booking API (e2e)', () => {
         .send({ releaseYear: 'soon' })
         .expect(400);
       await http()
+        .patch(`/films/${filmId}`)
+        .send({ durationMinutes: null })
+        .expect(400);
+      await http()
         .patch(`/films/${MISSING_ID}`)
         .send({ title: 'X' })
         .expect(404);
-      const stored = await http().get(`/films/${filmId}`).expect(200);
-      expect(stored.body).toMatchObject({ title: 'Dune: Part Two' });
+      const saved = await http().get(`/films/${filmId}`).expect(200);
+      expect(saved.body).toMatchObject({
+        title: 'Dune: Part Two',
+        durationMinutes: 166,
+      });
     });
   });
 
@@ -178,11 +225,38 @@ describe('Cinema booking API (e2e)', () => {
       });
       expect(Array.isArray(body<ErrorBody>(invalid).message)).toBe(true);
 
-      const badUuid = await http().get('/films/not-a-uuid').expect(400);
-      expect(body<ErrorBody>(badUuid)).toMatchObject({
+      const badId = await http().get('/films/not-an-id').expect(400);
+      expect(body<ErrorBody>(badId)).toMatchObject({
         statusCode: 400,
-        path: '/films/not-a-uuid',
+        path: '/films/not-an-id',
       });
+    });
+
+    it('a malformed ObjectId -> 400 explaining the format, on every route with an id', async () => {
+      const malformed = [
+        ['get', '/films/123'],
+        ['patch', '/films/123'],
+        ['delete', '/films/123'],
+        ['get', '/halls/123'],
+        ['delete', '/halls/123'],
+        ['get', '/showings/123'],
+        ['get', '/showings/123/seats'],
+        ['get', '/showings/123/bookings'],
+        ['post', '/showings/123/bookings'],
+        ['delete', '/bookings/123'],
+        // 12 characters: accepted by ObjectId.isValid(), but not a 24-hex id.
+        ['get', '/films/abcdefghijkl'],
+        ['get', '/films/zzzzzzzzzzzzzzzzzzzzzzzz'],
+      ] as const;
+      for (const [method, url] of malformed) {
+        const res = await http()
+          [method](url)
+          .send({ title: 'X', seats: [{ row: 1, seat: 1 }] });
+        expect({ url, status: res.status }).toEqual({ url, status: 400 });
+        expect(body<ErrorBody>(res).message).toContain(
+          '24 hexadecimal characters',
+        );
+      }
     });
   });
 
@@ -193,10 +267,12 @@ describe('Cinema booking API (e2e)', () => {
         .send({ name: 'Red', rows: 3, seatsPerRow: 5 })
         .expect(201);
       hallId = body<Entity>(res).id;
-      await http()
+      expect(body<Entity>(res).id).toMatch(OBJECT_ID);
+      const duplicate = await http()
         .post('/halls')
         .send({ name: ' red ', rows: 2, seatsPerRow: 2 })
         .expect(409);
+      expect(body<ErrorBody>(duplicate).message).toContain('already exists');
       await http()
         .post('/halls')
         .send({ name: 'Blue', rows: 0, seatsPerRow: 2 })
@@ -230,13 +306,21 @@ describe('Cinema booking API (e2e)', () => {
         .send({ filmId, hallId, startsAt: `${FUTURE}T18:00:00Z`, price: 12500 })
         .expect(201);
       expect(body<ShowingBody>(a)).toEqual({
-        id: expect.any(String) as string,
+        id: expect.stringMatching(OBJECT_ID) as string,
         film: { id: filmId, title: 'Dune: Part Two' },
         hall: { id: hallId, name: 'Red' },
         startsAt: `${FUTURE}T18:00:00.000Z`,
         price: 12500,
       });
       showingA = body<Entity>(a).id;
+
+      // The document itself holds all 15 seats of the 3 × 5 hall, all free, and no bookings.
+      const doc = await showingModel.findById(showingA).lean();
+      expect(doc?.seats).toHaveLength(15);
+      expect(doc?.seats[0]).toEqual({ row: 1, seat: 1, bookingId: null });
+      expect(doc?.seats[14]).toEqual({ row: 3, seat: 5, bookingId: null });
+      expect(doc?.bookings).toEqual([]);
+      expect(doc?.film).toBeInstanceOf(Types.ObjectId);
 
       const b = await http()
         .post('/showings')
@@ -273,6 +357,17 @@ describe('Cinema booking API (e2e)', () => {
         .send({ ...base, hallId: MISSING_ID })
         .expect(400);
       expect(body<ErrorBody>(missingHall).message).toContain('Hall');
+      const badFilmId = await http()
+        .post('/showings')
+        .send({ ...base, filmId: 'abc' })
+        .expect(400);
+      expect(body<ErrorBody>(badFilmId).message).toEqual([
+        expect.stringContaining('filmId: expected a MongoDB ObjectId'),
+      ]);
+      await http()
+        .post('/showings')
+        .send({ ...base, hallId: '123' })
+        .expect(400);
       await http()
         .post('/showings')
         .send({ ...base, startsAt: '2020-01-01T10:00:00Z' })
@@ -299,9 +394,12 @@ describe('Cinema booking API (e2e)', () => {
         limit: 20,
       });
       expect(ids(res)).toEqual([showingB, showingA, showingC]);
-      expect(body<PageBody>(res).items[0]).toMatchObject({
-        film: { title: 'Arrival' },
-        hall: { name: 'Red' },
+      expect(body<PageBody>(res).items[0]).toEqual({
+        id: showingB,
+        film: { id: otherFilmId, title: 'Arrival' },
+        hall: { id: hallId, name: 'Red' },
+        startsAt: `${FUTURE}T12:00:00.000Z`,
+        price: 10000,
       });
     });
 
@@ -369,10 +467,13 @@ describe('Cinema booking API (e2e)', () => {
         created.push(body<Entity>(res).id);
       }
       const res = await http().get('/showings?date=2030-06-01').expect(200);
+      // ObjectId hex strings of equal length sort in the same order as the ids.
       expect(ids(res)).toEqual([...created].sort());
-      await dataSource.query('DELETE FROM showings WHERE id = ANY($1)', [
-        created,
-      ]);
+      const desc = await http()
+        .get('/showings?date=2030-06-01&sort=desc')
+        .expect(200);
+      expect(ids(desc)).toEqual([...created].sort());
+      await showingModel.deleteMany({ _id: { $in: created } });
     });
 
     it('GET /showings -> 400 for invalid page, limit, date, sort, filmId', async () => {
@@ -390,6 +491,7 @@ describe('Cinema booking API (e2e)', () => {
         'date=10-05-2030',
         'date=2030-02-30',
         'filmId=123',
+        'filmId=not-an-object-id-at-all!',
       ];
       for (const query of invalid) {
         const res = await http().get(`/showings?${query}`);
@@ -401,8 +503,17 @@ describe('Cinema booking API (e2e)', () => {
     it('GET /showings/:id and /seats', async () => {
       const one = await http().get(`/showings/${showingA}`).expect(200);
       expect(body<ShowingBody>(one).film.title).toBe('Dune: Part Two');
+      expect(body<ShowingBody>(one).hall.name).toBe('Red');
+      expect(one.body).not.toHaveProperty('seats');
+      expect(one.body).not.toHaveProperty('bookings');
+      expect(one.body).not.toHaveProperty('_id');
       const seats = await http().get(`/showings/${showingA}/seats`).expect(200);
       expect(seats.body).toHaveLength(15);
+      expect(body<SeatBody[]>(seats)[0]).toEqual({
+        row: 1,
+        seat: 1,
+        isBooked: false,
+      });
       expect(body<SeatBody[]>(seats).every((s) => !s.isBooked)).toBe(true);
       await http().get(`/showings/${MISSING_ID}`).expect(404);
       await http().get(`/showings/${MISSING_ID}/seats`).expect(404);
@@ -421,7 +532,7 @@ describe('Cinema booking API (e2e)', () => {
         })
         .expect(201);
       expect(body<BookingBody>(res)).toEqual({
-        id: expect.any(String) as string,
+        id: expect.stringMatching(OBJECT_ID) as string,
         showingId: showingA,
         seats: [
           { row: 2, seat: 3 },
@@ -433,8 +544,20 @@ describe('Cinema booking API (e2e)', () => {
       bookingId = body<Entity>(res).id;
 
       const seats = await http().get(`/showings/${showingA}/seats`).expect(200);
-      expect(body<SeatBody[]>(seats).filter((s) => s.isBooked)).toHaveLength(2);
-      expect(await count('booking_seats')).toBe(2);
+      expect(body<SeatBody[]>(seats).filter((s) => s.isBooked)).toEqual([
+        { row: 2, seat: 3, isBooked: true },
+        { row: 2, seat: 4, isBooked: true },
+      ]);
+      expect(await stored()).toEqual({ bookings: 1, bookedSeats: 2 });
+
+      // seats[].bookingId points to the embedded booking with the same id.
+      const doc = await showingModel.findById(showingA).lean();
+      const booked = doc?.seats.filter((s) => s.bookingId !== null);
+      expect(booked?.map((s) => s.bookingId?.toHexString())).toEqual([
+        bookingId,
+        bookingId,
+      ]);
+      expect(doc?.bookings[0]._id.toHexString()).toBe(bookingId);
     });
 
     it('validation errors -> 400, missing showing -> 404', async () => {
@@ -453,9 +576,14 @@ describe('Cinema booking API (e2e)', () => {
           ],
         })
         .expect(400);
-      await http()
+      const outside = await http()
         .post(url)
         .send({ seats: [{ row: 9, seat: 1 }] })
+        .expect(400);
+      expect(body<ErrorBody>(outside).message).toContain('do not exist');
+      await http()
+        .post(url)
+        .send({ seats: [{ row: 1, seat: 6 }] })
         .expect(400);
       await http()
         .post(url)
@@ -472,8 +600,12 @@ describe('Cinema booking API (e2e)', () => {
     });
 
     it('409 when any seat is taken, and nothing is written', async () => {
-      const bookingsBefore = await count('bookings');
-      const seatsBefore = await count('booking_seats');
+      const before = await stored();
+      // An already booked seat in a hall-bounds-valid request is a conflict, not 400.
+      await http()
+        .post(`/showings/${showingA}/bookings`)
+        .send({ seats: [{ row: 2, seat: 3 }] })
+        .expect(409);
 
       const res = await http()
         .post(`/showings/${showingA}/bookings`)
@@ -489,8 +621,7 @@ describe('Cinema booking API (e2e)', () => {
         path: `/showings/${showingA}/bookings`,
       });
 
-      expect(await count('bookings')).toBe(bookingsBefore);
-      expect(await count('booking_seats')).toBe(seatsBefore);
+      expect(await stored()).toEqual(before);
       const seats = await http().get(`/showings/${showingA}/seats`).expect(200);
       const seat11 = body<SeatBody[]>(seats).find(
         (s) => s.row === 1 && s.seat === 1,
@@ -498,8 +629,8 @@ describe('Cinema booking API (e2e)', () => {
       expect(seat11?.isBooked).toBe(false);
     });
 
-    it('the same seat is booked only once under concurrent requests (unique index + transaction)', async () => {
-      const bookingsBefore = await count('bookings');
+    it('the same seat is booked only once under concurrent requests (single-document update)', async () => {
+      const before = await stored();
       const attempts = await Promise.all(
         Array.from({ length: 8 }, () =>
           http()
@@ -514,13 +645,24 @@ describe('Cinema booking API (e2e)', () => {
       );
       const statuses = attempts.map((res) => res.status).sort();
       expect(statuses).toEqual([201, 409, 409, 409, 409, 409, 409, 409]);
-      for (const res of attempts.filter((r) => r.status === 409)) {
-        // The database error text never reaches the client.
-        expect(JSON.stringify(res.body)).not.toMatch(
-          /duplicate|constraint|UQ_/i,
-        );
-      }
-      expect(await count('bookings')).toBe(bookingsBefore + 1);
+      expect(await stored()).toEqual({
+        bookings: before.bookings + 1,
+        bookedSeats: before.bookedSeats + 2,
+      });
+
+      // Two parallel requests for the same seat: exactly one wins.
+      const pair = await Promise.all(
+        [1, 2].map(() =>
+          http()
+            .post(`/showings/${showingB}/bookings`)
+            .send({ seats: [{ row: 1, seat: 5 }] }),
+        ),
+      );
+      expect(pair.map((res) => res.status).sort()).toEqual([201, 409]);
+      const pairWinner = pair.find((res) => res.status === 201);
+      await http()
+        .delete(`/bookings/${body<Entity>(pairWinner as Response).id}`)
+        .expect(204);
 
       const winner = attempts.find((res) => res.status === 201);
       await http()
@@ -529,12 +671,29 @@ describe('Cinema booking API (e2e)', () => {
     });
 
     it('lists bookings and cancels a booking, freeing its seats', async () => {
+      const other = await http()
+        .post(`/showings/${showingC}/bookings`)
+        .send({ seats: [{ row: 1, seat: 1 }] })
+        .expect(201);
+      // GET /bookings collects the embedded bookings of every showing.
       const all = await http().get('/bookings').expect(200);
-      expect(body<BookingBody[]>(all)).toHaveLength(1);
-      expect(body<BookingBody[]>(all)[0].seats).toEqual([
-        { row: 2, seat: 3 },
-        { row: 2, seat: 4 },
-      ]);
+      expect(body<BookingBody[]>(all)).toHaveLength(2);
+      expect(body<BookingBody[]>(all)[0]).toMatchObject({
+        id: bookingId,
+        showingId: showingA,
+        seats: [
+          { row: 2, seat: 3 },
+          { row: 2, seat: 4 },
+        ],
+      });
+      expect(body<BookingBody[]>(all)[1]).toMatchObject({
+        showingId: showingC,
+        totalPrice: 9000,
+      });
+      await http()
+        .delete(`/bookings/${body<Entity>(other).id}`)
+        .expect(204);
+
       const byShowing = await http()
         .get(`/showings/${showingA}/bookings`)
         .expect(200);
@@ -542,13 +701,15 @@ describe('Cinema booking API (e2e)', () => {
       const otherShowing = await http()
         .get(`/showings/${showingC}/bookings`)
         .expect(200);
+      // The booking of showing C was cancelled above.
       expect(otherShowing.body).toHaveLength(0);
       await http().get(`/showings/${MISSING_ID}/bookings`).expect(404);
 
       await http().delete(`/bookings/${bookingId}`).expect(204);
       await http().delete(`/bookings/${bookingId}`).expect(404);
-      // ON DELETE CASCADE removed the seat rows of the booking.
-      expect(await count('booking_seats')).toBe(0);
+      await http().delete(`/bookings/${MISSING_ID}`).expect(404);
+      // One update freed the seats and pulled the booking from the array.
+      expect(await stored()).toEqual({ bookings: 0, bookedSeats: 0 });
       const seats = await http().get(`/showings/${showingA}/seats`).expect(200);
       expect(body<SeatBody[]>(seats).some((s) => s.isBooked)).toBe(false);
 
@@ -587,7 +748,7 @@ describe('Cinema booking API (e2e)', () => {
   });
 
   describe('swagger', () => {
-    it('is served on /docs and describes the page response and query parameters', async () => {
+    it('is served on /docs and describes the page response, query and ObjectId parameters', async () => {
       await http().get('/docs').expect(200);
       const res = await http().get('/docs-json').expect(200);
       const doc = body<{
@@ -596,7 +757,10 @@ describe('Cinema booking API (e2e)', () => {
           Record<
             string,
             {
-              parameters?: { name: string }[];
+              parameters?: {
+                name: string;
+                schema?: { pattern?: string };
+              }[];
               responses: Record<
                 string,
                 { content?: Record<string, { schema: { $ref?: string } }> }
@@ -614,6 +778,13 @@ describe('Cinema booking API (e2e)', () => {
         list.responses['200'].content?.['application/json'].schema,
       ).toEqual({ $ref: '#/components/schemas/ShowingsPageDto' });
       expect(doc.components.schemas).toHaveProperty('ErrorResponseDto');
+      const idParam = doc.paths['/films/{id}'].get.parameters?.find(
+        (p) => p.name === 'id',
+      );
+      expect(idParam?.schema?.pattern).toBe('^[0-9a-fA-F]{24}$');
+      expect(Object.keys(doc.paths['/bookings/{id}'].delete.responses)).toEqual(
+        expect.arrayContaining(['204', '400', '404']),
+      );
     });
   });
 });

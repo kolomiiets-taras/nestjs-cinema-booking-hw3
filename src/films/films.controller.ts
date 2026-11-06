@@ -6,7 +6,6 @@ import {
   HttpCode,
   HttpStatus,
   Param,
-  ParseUUIDPipe,
   Patch,
   Post,
 } from '@nestjs/common';
@@ -20,9 +19,11 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { ErrorResponseDto } from '../common/dto/error-response.dto';
+import { ParseObjectIdPipe } from '../common/pipes/parse-object-id.pipe';
+import { ApiObjectIdParam } from '../common/swagger/api-object-id-param.decorator';
 import { CreateFilmDto } from './dto/create-film.dto';
 import { UpdateFilmDto } from './dto/update-film.dto';
-import { Film } from './entities/film.entity';
+import { FilmResponseDto } from './dto/film-response.dto';
 import { FilmsService } from './films.service';
 
 @ApiTags('films')
@@ -31,58 +32,63 @@ export class FilmsController {
   constructor(private readonly filmsService: FilmsService) {}
 
   @Post()
-  @ApiCreatedResponse({ type: Film, description: 'Фільм створено' })
+  @ApiCreatedResponse({ type: FilmResponseDto, description: 'Фільм створено' })
   @ApiBadRequestResponse({
     type: ErrorResponseDto,
     description: 'Поле відсутнє або має неправильний тип',
   })
-  create(@Body() dto: CreateFilmDto): Promise<Film> {
+  create(@Body() dto: CreateFilmDto): Promise<FilmResponseDto> {
     return this.filmsService.create(dto);
   }
 
   @Get()
-  @ApiOkResponse({ type: [Film], description: 'Фільми за назвою' })
-  findAll(): Promise<Film[]> {
+  @ApiOkResponse({ type: [FilmResponseDto], description: 'Фільми за назвою' })
+  findAll(): Promise<FilmResponseDto[]> {
     return this.filmsService.findAll();
   }
 
   @Get(':id')
-  @ApiOkResponse({ type: Film })
+  @ApiObjectIdParam('id фільму')
+  @ApiOkResponse({ type: FilmResponseDto })
   @ApiBadRequestResponse({
     type: ErrorResponseDto,
-    description: 'id не є UUID',
+    description: 'id не є ObjectId',
   })
   @ApiNotFoundResponse({
     type: ErrorResponseDto,
     description: 'Фільм не знайдено',
   })
-  findOne(@Param('id', ParseUUIDPipe) id: string): Promise<Film> {
+  findOne(
+    @Param('id', ParseObjectIdPipe) id: string,
+  ): Promise<FilmResponseDto> {
     return this.filmsService.findOne(id);
   }
 
   @Patch(':id')
-  @ApiOkResponse({ type: Film, description: 'Оновлений фільм' })
+  @ApiObjectIdParam('id фільму')
+  @ApiOkResponse({ type: FilmResponseDto, description: 'Оновлений фільм' })
   @ApiBadRequestResponse({
     type: ErrorResponseDto,
-    description: 'Поле має неправильний тип або id не є UUID',
+    description: 'Поле має неправильний тип або id не є ObjectId',
   })
   @ApiNotFoundResponse({
     type: ErrorResponseDto,
     description: 'Фільм не знайдено',
   })
   update(
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('id', ParseObjectIdPipe) id: string,
     @Body() dto: UpdateFilmDto,
-  ): Promise<Film> {
+  ): Promise<FilmResponseDto> {
     return this.filmsService.update(id, dto);
   }
 
   @Delete(':id')
+  @ApiObjectIdParam('id фільму')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiNoContentResponse({ description: 'Фільм видалено' })
   @ApiBadRequestResponse({
     type: ErrorResponseDto,
-    description: 'id не є UUID',
+    description: 'id не є ObjectId',
   })
   @ApiNotFoundResponse({
     type: ErrorResponseDto,
@@ -92,7 +98,7 @@ export class FilmsController {
     type: ErrorResponseDto,
     description: 'Для фільму існують сеанси',
   })
-  remove(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
+  remove(@Param('id', ParseObjectIdPipe) id: string): Promise<void> {
     return this.filmsService.remove(id);
   }
 }

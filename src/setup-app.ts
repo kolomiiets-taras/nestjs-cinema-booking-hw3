@@ -15,9 +15,11 @@ export function setupApp(app: INestApplication): void {
   const config = new DocumentBuilder()
     .setTitle('Cinema Booking API')
     .setDescription(
-      'Фільми, зали, сеанси та бронювання місць (PostgreSQL + TypeORM)',
+      'Фільми, зали, сеанси та бронювання місць (MongoDB + Mongoose). ' +
+        'Усі ідентифікатори — ObjectId: рядок із 24 шістнадцяткових символів; ' +
+        'інший формат дає 400 ще до звернення до бази.',
     )
-    .setVersion('2.0')
+    .setVersion('3.0')
     .build();
   SwaggerModule.setup('docs', app, SwaggerModule.createDocument(app, config));
 }

@@ -5,88 +5,73 @@ import {
   NotFoundException,
   forwardRef,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Raw, Repository } from 'typeorm';
-import {
-  PG_FOREIGN_KEY_VIOLATION,
-  PG_UNIQUE_VIOLATION,
-  isDatabaseError,
-} from '../common/database-errors';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { isDuplicateKeyError } from '../common/database-errors';
 import { ShowingsService } from '../showings/showings.service';
 import { CreateHallDto } from './dto/create-hall.dto';
-import { HallWithSeatsDto, Seat } from './dto/hall-with-seats.dto';
-import { Hall } from './entities/hall.entity';
+import {
+  HallResponseDto,
+  HallWithSeatsDto,
+  SeatPositionDto,
+} from './dto/hall-response.dto';
+import { Hall, HallDocument } from './schemas/hall.schema';
+
+/** Hall layout: the only fields needed to expand or check seats. */
+type HallLayout = Pick<Hall, 'rows' | 'seatsPerRow'>;
 
 @Injectable()
 export class HallsService {
   constructor(
-    @InjectRepository(Hall)
-    private readonly hallsRepository: Repository<Hall>,
+    @InjectModel(Hall.name)
+    private readonly hallModel: Model<Hall>,
     // Showings depend on halls (existence, names, seat layout), and deleting a hall depends on showings.
     @Inject(forwardRef(() => ShowingsService))
     private readonly showingsService: ShowingsService,
   ) {}
 
-  async create(dto: CreateHallDto): Promise<Hall> {
-    const name = dto.name.trim();
-    // The unique constraint on halls.name is case-sensitive; the API also treats
-    // "Red Hall" and "red hall" as the same name.
-    const duplicate = await this.hallsRepository.exists({
-      where: {
-        name: Raw((column) => `LOWER(${column}) = LOWER(:name)`, { name }),
-      },
-    });
-    if (duplicate) {
-      throw this.duplicateNameConflict(name);
-    }
+  async create(dto: CreateHallDto): Promise<HallResponseDto> {
     try {
-      return await this.hallsRepository.save(
-        this.hallsRepository.create({
-          name,
-          rows: dto.rows,
-          seatsPerRow: dto.seatsPerRow,
-        }),
-      );
+      const hall = await this.hallModel.create({
+        name: dto.name,
+        rows: dto.rows,
+        seatsPerRow: dto.seatsPerRow,
+      });
+      return HallResponseDto.from(hall);
     } catch (error) {
-      // Two requests with the same name at the same time: the unique constraint decides.
-      if (isDatabaseError(error, PG_UNIQUE_VIOLATION)) {
-        throw this.duplicateNameConflict(name);
+      // The unique index on name (case-insensitive) decides, also for concurrent requests.
+      if (isDuplicateKeyError(error)) {
+        throw new ConflictException(
+          `Hall with name "${dto.name}" already exists`,
+        );
       }
       throw error;
     }
   }
 
-  findAll(): Promise<Hall[]> {
-    return this.hallsRepository.find({ order: { name: 'ASC', id: 'ASC' } });
+  async findAll(): Promise<HallResponseDto[]> {
+    const halls = await this.hallModel.find().sort({ name: 1, _id: 1 }).lean();
+    return halls.map((hall) => HallResponseDto.from(hall));
   }
 
   /** Returns the hall or null; used by other modules for domain checks. */
-  find(id: string): Promise<Hall | null> {
-    return this.hallsRepository.findOneBy({ id });
-  }
-
-  async findOne(id: string): Promise<Hall> {
-    const hall = await this.find(id);
-    if (!hall) {
-      throw new NotFoundException(`Hall with id "${id}" not found`);
-    }
-    return hall;
+  find(id: string): Promise<HallDocument | null> {
+    return this.hallModel.findById(id).exec();
   }
 
   async findOneWithSeats(id: string): Promise<HallWithSeatsDto> {
-    const hall = await this.findOne(id);
-    return {
-      id: hall.id,
-      name: hall.name,
-      rows: hall.rows,
-      seatsPerRow: hall.seatsPerRow,
+    const hall = await this.find(id);
+    if (!hall) {
+      throw this.notFound(id);
+    }
+    return Object.assign(new HallWithSeatsDto(), HallResponseDto.from(hall), {
       seats: this.getSeats(hall),
-    };
+    });
   }
 
-  /** Seats are not stored: they are derived from rows × seatsPerRow. */
-  getSeats(hall: Hall): Seat[] {
-    const seats: Seat[] = [];
+  /** Seats are not stored in the hall: they are derived from rows × seatsPerRow. */
+  getSeats(hall: HallLayout): SeatPositionDto[] {
+    const seats: SeatPositionDto[] = [];
     for (let row = 1; row <= hall.rows; row++) {
       for (let seat = 1; seat <= hall.seatsPerRow; seat++) {
         seats.push({ row, seat });
@@ -95,35 +80,26 @@ export class HallsService {
     return seats;
   }
 
-  hasSeat(hall: Hall, { row, seat }: Seat): boolean {
+  hasSeat(hall: HallLayout, { row, seat }: SeatPositionDto): boolean {
     return (
       row >= 1 && row <= hall.rows && seat >= 1 && seat <= hall.seatsPerRow
     );
   }
 
+  /** There are no foreign keys in MongoDB: dependent showings are checked by a query. */
   async remove(id: string): Promise<void> {
-    await this.findOne(id);
+    if (!(await this.hallModel.exists({ _id: id }))) {
+      throw this.notFound(id);
+    }
     if (await this.showingsService.existsForHall(id)) {
-      throw this.hasShowingsConflict(id);
+      throw new ConflictException(
+        `Hall "${id}" cannot be deleted: it has scheduled showings`,
+      );
     }
-    try {
-      await this.hallsRepository.delete({ id });
-    } catch (error) {
-      // A showing created between the check and the delete: the RESTRICT foreign key stops it.
-      if (isDatabaseError(error, PG_FOREIGN_KEY_VIOLATION)) {
-        throw this.hasShowingsConflict(id);
-      }
-      throw error;
-    }
+    await this.hallModel.deleteOne({ _id: id });
   }
 
-  private duplicateNameConflict(name: string): ConflictException {
-    return new ConflictException(`Hall with name "${name}" already exists`);
-  }
-
-  private hasShowingsConflict(id: string): ConflictException {
-    return new ConflictException(
-      `Hall "${id}" cannot be deleted: it has scheduled showings`,
-    );
+  private notFound(id: string): NotFoundException {
+    return new NotFoundException(`Hall with id "${id}" not found`);
   }
 }

@@ -1,21 +1,20 @@
 services:
-  db:
-    image: postgres:18
+  mongodb:
+    image: mongo:7
     restart: unless-stopped
     ports:
-      - '${POSTGRES_PORT:-5432}:5432'
+      - '${MONGO_PORT:-27017}:27017'
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      # The root user is created only on the first start with an empty volume.
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?set MONGO_ROOT_USERNAME in .env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in .env}
     volumes:
-      # Postgres 18 keeps its cluster in a versioned subdirectory of /var/lib/postgresql
-      - cinema-pgdata:/var/lib/postgresql
+      - cinema-mongodata:/data/db
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      test: ['CMD', 'mongosh', '--quiet', '--eval', 'db.adminCommand("ping").ok']
       interval: 5s
       timeout: 5s
       retries: 10
 
 volumes:
-  cinema-pgdata:
+  cinema-mongodata:

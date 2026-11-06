@@ -6,7 +6,6 @@ import {
   HttpCode,
   HttpStatus,
   Param,
-  ParseUUIDPipe,
   Post,
 } from '@nestjs/common';
 import {
@@ -19,6 +18,8 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { ErrorResponseDto } from '../common/dto/error-response.dto';
+import { ParseObjectIdPipe } from '../common/pipes/parse-object-id.pipe';
+import { ApiObjectIdParam } from '../common/swagger/api-object-id-param.decorator';
 import { BookingsService } from './bookings.service';
 import { BookingResponseDto } from './dto/booking-response.dto';
 import { CreateBookingDto } from './dto/create-booking.dto';
@@ -31,21 +32,22 @@ export class BookingsController {
   @Get('bookings')
   @ApiOkResponse({
     type: [BookingResponseDto],
-    description: 'Усі бронювання',
+    description: 'Усі бронювання, зібрані з документів усіх сеансів',
   })
   findAll(): Promise<BookingResponseDto[]> {
     return this.bookingsService.findAll();
   }
 
   @Post('showings/:id/bookings')
+  @ApiObjectIdParam('id сеансу')
   @ApiCreatedResponse({
     type: BookingResponseDto,
-    description: 'Бронювання створено (одна транзакція: бронювання + місця)',
+    description: 'Бронювання створено одним оновленням документа сеансу',
   })
   @ApiBadRequestResponse({
     type: ErrorResponseDto,
     description:
-      'Масив місць порожній, елемент без row/seat, місце повторюється або не існує в залі',
+      'id не є ObjectId; масив місць порожній, елемент без row/seat, місце повторюється або не існує в залі',
   })
   @ApiNotFoundResponse({
     type: ErrorResponseDto,
@@ -56,45 +58,47 @@ export class BookingsController {
     description: 'Хоча б одне місце вже зайняте — не бронюється жодне',
   })
   create(
-    @Param('id', ParseUUIDPipe) showingId: string,
+    @Param('id', ParseObjectIdPipe) showingId: string,
     @Body() dto: CreateBookingDto,
   ): Promise<BookingResponseDto> {
     return this.bookingsService.create(showingId, dto);
   }
 
   @Get('showings/:id/bookings')
+  @ApiObjectIdParam('id сеансу')
   @ApiOkResponse({
     type: [BookingResponseDto],
     description: 'Бронювання сеансу',
   })
   @ApiBadRequestResponse({
     type: ErrorResponseDto,
-    description: 'id не є UUID',
+    description: 'id не є ObjectId',
   })
   @ApiNotFoundResponse({
     type: ErrorResponseDto,
     description: 'Сеанс не знайдено',
   })
   findByShowing(
-    @Param('id', ParseUUIDPipe) showingId: string,
+    @Param('id', ParseObjectIdPipe) showingId: string,
   ): Promise<BookingResponseDto[]> {
     return this.bookingsService.findByShowing(showingId);
   }
 
   @Delete('bookings/:id')
+  @ApiObjectIdParam('id бронювання')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiNoContentResponse({
     description: 'Бронювання скасовано, місця звільнено',
   })
   @ApiBadRequestResponse({
     type: ErrorResponseDto,
-    description: 'id не є UUID',
+    description: 'id не є ObjectId',
   })
   @ApiNotFoundResponse({
     type: ErrorResponseDto,
     description: 'Бронювання не знайдено',
   })
-  remove(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
+  remove(@Param('id', ParseObjectIdPipe) id: string): Promise<void> {
     return this.bookingsService.remove(id);
   }
 }

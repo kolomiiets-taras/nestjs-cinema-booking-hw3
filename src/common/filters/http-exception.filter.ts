@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { Error as MongooseError } from 'mongoose';
 import { ErrorResponseDto } from '../dto/error-response.dto';
 
 /**
@@ -35,6 +36,10 @@ export class HttpExceptionFilter implements ExceptionFilter {
           ? exceptionResponse
           : ((exceptionResponse as { message?: string | string[] }).message ??
             exception.message);
+    } else if (exception instanceof MongooseError.ValidationError) {
+      // Schema-level validation is a second line behind the DTOs (e.g. a field set to null in PATCH).
+      status = HttpStatus.BAD_REQUEST;
+      message = Object.values(exception.errors).map((error) => error.message);
     } else {
       this.logger.error(
         `${request.method} ${request.url}`,

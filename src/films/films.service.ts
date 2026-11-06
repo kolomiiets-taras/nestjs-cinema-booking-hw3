@@ -5,73 +5,72 @@ import {
   NotFoundException,
   forwardRef,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import {
-  PG_FOREIGN_KEY_VIOLATION,
-  isDatabaseError,
-} from '../common/database-errors';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import { ShowingsService } from '../showings/showings.service';
 import { CreateFilmDto } from './dto/create-film.dto';
+import { FilmResponseDto } from './dto/film-response.dto';
 import { UpdateFilmDto } from './dto/update-film.dto';
-import { Film } from './entities/film.entity';
+import { Film, FilmDocument } from './schemas/film.schema';
 
 @Injectable()
 export class FilmsService {
   constructor(
-    @InjectRepository(Film)
-    private readonly filmsRepository: Repository<Film>,
+    @InjectModel(Film.name)
+    private readonly filmModel: Model<Film>,
     // Showings depend on films (existence, titles), and deleting a film depends on showings.
     @Inject(forwardRef(() => ShowingsService))
     private readonly showingsService: ShowingsService,
   ) {}
 
-  create(dto: CreateFilmDto): Promise<Film> {
-    return this.filmsRepository.save(this.filmsRepository.create(dto));
+  async create(dto: CreateFilmDto): Promise<FilmResponseDto> {
+    const film = await this.filmModel.create(dto);
+    return FilmResponseDto.from(film);
   }
 
-  findAll(): Promise<Film[]> {
-    return this.filmsRepository.find({ order: { title: 'ASC', id: 'ASC' } });
+  async findAll(): Promise<FilmResponseDto[]> {
+    const films = await this.filmModel.find().sort({ title: 1, _id: 1 }).lean();
+    return films.map((film) => FilmResponseDto.from(film));
   }
 
   /** Returns the film or null; used by other modules for domain checks. */
-  find(id: string): Promise<Film | null> {
-    return this.filmsRepository.findOneBy({ id });
+  find(id: string): Promise<FilmDocument | null> {
+    return this.filmModel.findById(id).exec();
   }
 
-  async findOne(id: string): Promise<Film> {
+  async findOne(id: string): Promise<FilmResponseDto> {
     const film = await this.find(id);
     if (!film) {
-      throw new NotFoundException(`Film with id "${id}" not found`);
+      throw this.notFound(id);
     }
-    return film;
+    return FilmResponseDto.from(film);
   }
 
-  async update(id: string, dto: UpdateFilmDto): Promise<Film> {
-    const film = await this.findOne(id);
-    this.filmsRepository.merge(film, dto);
-    return this.filmsRepository.save(film);
+  async update(id: string, dto: UpdateFilmDto): Promise<FilmResponseDto> {
+    const film = await this.filmModel.findByIdAndUpdate(id, dto, {
+      returnDocument: 'after',
+      runValidators: true,
+    });
+    if (!film) {
+      throw this.notFound(id);
+    }
+    return FilmResponseDto.from(film);
   }
 
+  /** There are no foreign keys in MongoDB: dependent showings are checked by a query. */
   async remove(id: string): Promise<void> {
-    await this.findOne(id);
+    if (!(await this.filmModel.exists({ _id: id }))) {
+      throw this.notFound(id);
+    }
     if (await this.showingsService.existsForFilm(id)) {
-      throw this.hasShowingsConflict(id);
+      throw new ConflictException(
+        `Film "${id}" cannot be deleted: it has scheduled showings`,
+      );
     }
-    try {
-      await this.filmsRepository.delete({ id });
-    } catch (error) {
-      // A showing created between the check and the delete: the RESTRICT foreign key stops it.
-      if (isDatabaseError(error, PG_FOREIGN_KEY_VIOLATION)) {
-        throw this.hasShowingsConflict(id);
-      }
-      throw error;
-    }
+    await this.filmModel.deleteOne({ _id: id });
   }
 
-  private hasShowingsConflict(id: string): ConflictException {
-    return new ConflictException(
-      `Film "${id}" cannot be deleted: it has scheduled showings`,
-    );
+  private notFound(id: string): NotFoundException {
+    return new NotFoundException(`Film with id "${id}" not found`);
   }
 }

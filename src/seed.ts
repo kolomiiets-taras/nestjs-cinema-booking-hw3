@@ -1,22 +1,21 @@
-import {
-  DataSource,
-  DeepPartial,
-  EntityManager,
-  FindOptionsWhere,
-  ObjectLiteral,
-} from 'typeorm';
-import dataSource from './data-source';
-import { Film } from './films/entities/film.entity';
-import { Hall } from './halls/entities/hall.entity';
-import { BookingSeat } from './showings/entities/booking-seat.entity';
-import { Booking } from './showings/entities/booking.entity';
-import { Showing } from './showings/entities/showing.entity';
+import { INestApplicationContext } from '@nestjs/common';
+import { NestFactory } from '@nestjs/core';
+import { getModelToken } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
+import { AppModule } from './app.module';
+import { Film } from './films/schemas/film.schema';
+import { HallsService } from './halls/halls.service';
+import { Hall } from './halls/schemas/hall.schema';
+import { Showing } from './showings/schemas/showing.schema';
 
 /**
  * Fills the database with a small data set for manual checks:
  * 3 films, 2 halls, 4 showings on different dates and 1 booking.
- * Run after migrations: `npm run seed`. Every record is looked up by its
- * natural key first, so running the script again creates no duplicates.
+ * Run with `npm run seed` (the MongoDB container must be up). The script boots
+ * the application context, so it uses the same validated config and models.
+ * Films, halls and showings are upserted by their natural keys, and the booking
+ * is written with the same "all seats free" condition as the API — running the
+ * script again creates no duplicates.
  */
 
 const FILMS = [
@@ -45,102 +44,131 @@ const BOOKING = {
   ],
 };
 
-async function findOrCreate<T extends ObjectLiteral>(
-  manager: EntityManager,
-  entity: new () => T,
-  where: NoInfer<FindOptionsWhere<T>>,
-  data: NoInfer<DeepPartial<T>>,
-): Promise<{ record: T; created: boolean }> {
-  const existing = await manager.findOneBy(entity, where);
-  if (existing) {
-    return { record: existing, created: false };
-  }
-  const record = await manager.save(entity, manager.create(entity, data));
-  return { record, created: true };
+interface Upserted {
+  _id: Types.ObjectId;
+  created: boolean;
 }
 
-async function seed(db: DataSource): Promise<void> {
-  await db.transaction(async (manager) => {
-    let created = 0;
+/** Inserts the document only when no document matches the key. */
+async function upsert<T>(
+  model: Model<T>,
+  key: Record<string, unknown>,
+  insert: Record<string, unknown>,
+): Promise<Upserted> {
+  const result = await model.updateOne(
+    key,
+    { $setOnInsert: insert },
+    { upsert: true },
+  );
+  if (result.upsertedId) {
+    return { _id: result.upsertedId, created: true };
+  }
+  const existing = await model
+    .findOne(key, { _id: 1 })
+    .lean<{ _id: Types.ObjectId }>();
+  if (!existing) {
+    throw new Error(`Seed: document ${JSON.stringify(key)} not found`);
+  }
+  return { _id: existing._id, created: false };
+}
 
-    const films: Film[] = [];
-    for (const data of FILMS) {
-      const result = await findOrCreate(
-        manager,
-        Film,
-        { title: data.title },
-        data,
-      );
-      films.push(result.record);
-      created += Number(result.created);
-    }
+async function seed(app: INestApplicationContext): Promise<void> {
+  const filmModel = app.get<Model<Film>>(getModelToken(Film.name));
+  const hallModel = app.get<Model<Hall>>(getModelToken(Hall.name));
+  const showingModel = app.get<Model<Showing>>(getModelToken(Showing.name));
+  const hallsService = app.get(HallsService);
 
-    const halls: Hall[] = [];
-    for (const data of HALLS) {
-      const result = await findOrCreate(
-        manager,
-        Hall,
-        { name: data.name },
-        data,
-      );
-      halls.push(result.record);
-      created += Number(result.created);
-    }
+  // The unique index on hall names must exist before the halls are written.
+  await Promise.all([filmModel.init(), hallModel.init(), showingModel.init()]);
 
-    const showings: Showing[] = [];
-    for (const data of SHOWINGS) {
-      const key = {
-        filmId: films[data.film].id,
-        hallId: halls[data.hall].id,
+  let created = 0;
+
+  const films: Upserted[] = [];
+  for (const film of FILMS) {
+    const result = await upsert(filmModel, { title: film.title }, film);
+    films.push(result);
+    created += Number(result.created);
+  }
+
+  const halls: Upserted[] = [];
+  for (const hall of HALLS) {
+    const result = await upsert(hallModel, { name: hall.name }, hall);
+    halls.push(result);
+    created += Number(result.created);
+  }
+
+  const showings: Upserted[] = [];
+  for (const data of SHOWINGS) {
+    const hall = HALLS[data.hall];
+    const result = await upsert(
+      showingModel,
+      {
+        film: films[data.film]._id,
+        hall: halls[data.hall]._id,
         startsAt: new Date(data.startsAt),
-      };
-      const result = await findOrCreate(manager, Showing, key, {
-        ...key,
+      },
+      {
         price: data.price,
-      });
-      showings.push(result.record);
-      created += Number(result.created);
-    }
-
-    const showing = showings[BOOKING.showing];
-    const alreadyBooked = await manager.existsBy(BookingSeat, {
-      showingId: showing.id,
-      row: BOOKING.seats[0].row,
-      seat: BOOKING.seats[0].seat,
-    });
-    if (!alreadyBooked) {
-      const booking = await manager.save(
-        manager.create(Booking, {
-          showingId: showing.id,
-          totalPrice: showing.price * BOOKING.seats.length,
-        }),
-      );
-      await manager.save(
-        BOOKING.seats.map((seat) =>
-          manager.create(BookingSeat, {
-            bookingId: booking.id,
-            showingId: showing.id,
-            ...seat,
-          }),
-        ),
-      );
-      created += 1;
-    }
-
-    console.log(
-      created > 0
-        ? `Seed: created ${created} record(s).`
-        : 'Seed: data already present, nothing to create.',
+        seats: hallsService
+          .getSeats(hall)
+          .map((seat) => ({ ...seat, bookingId: null })),
+        bookings: [],
+      },
     );
-  });
+    showings.push(result);
+    created += Number(result.created);
+  }
+
+  // Same single update as POST /showings/:id/bookings: when the seats are
+  // already taken (a previous run), the filter matches nothing.
+  const showing = SHOWINGS[BOOKING.showing];
+  const bookingId = new Types.ObjectId();
+  const booking = await showingModel.updateOne(
+    {
+      _id: showings[BOOKING.showing]._id,
+      $and: BOOKING.seats.map(({ row, seat }) => ({
+        seats: { $elemMatch: { row, seat, bookingId: null } },
+      })),
+    },
+    {
+      $set: { 'seats.$[target].bookingId': bookingId },
+      $push: {
+        bookings: {
+          _id: bookingId,
+          seats: BOOKING.seats,
+          totalPrice: showing.price * BOOKING.seats.length,
+          createdAt: new Date(),
+        },
+      },
+    },
+    {
+      arrayFilters: [
+        {
+          $or: BOOKING.seats.map(({ row, seat }) => ({
+            'target.row': row,
+            'target.seat': seat,
+          })),
+        },
+      ],
+    },
+  );
+  created += booking.matchedCount;
+
+  console.log(
+    created > 0
+      ? `Seed: created ${created} record(s).`
+      : 'Seed: data already present, nothing to create.',
+  );
 }
 
 async function main(): Promise<void> {
-  await dataSource.initialize();
+  const app = await NestFactory.createApplicationContext(AppModule, {
+    logger: ['error', 'warn'],
+  });
   try {
-    await seed(dataSource);
+    await seed(app);
   } finally {
-    await dataSource.destroy();
+    await app.close();
   }
 }
 

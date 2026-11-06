@@ -5,23 +5,36 @@ import {
   NotFoundException,
   forwardRef,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, QueryFilter, Types } from 'mongoose';
 import { FilmsService } from '../films/films.service';
 import { HallsService } from '../halls/halls.service';
 import { CreateShowingDto } from './dto/create-showing.dto';
-import { ShowingResponseDto } from './dto/showing-response.dto';
+import { SeatStateDto } from './dto/seat-state.dto';
+import {
+  PopulatedShowing,
+  ShowingResponseDto,
+} from './dto/showing-response.dto';
 import { ShowingsPageDto } from './dto/showings-page.dto';
 import { ShowingsQueryDto } from './dto/showings-query.dto';
-import { Showing } from './entities/showing.entity';
+import { Showing } from './schemas/showing.schema';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Responses never carry the embedded arrays: they can hold hundreds of elements. */
+const WITHOUT_ARRAYS = { seats: 0, bookings: 0 } as const;
+
+/** populate() options: only the fields the response needs. */
+const POPULATE_NAMES = [
+  { path: 'film', select: 'title' },
+  { path: 'hall', select: 'name' },
+];
 
 @Injectable()
 export class ShowingsService {
   constructor(
-    @InjectRepository(Showing)
-    private readonly showingsRepository: Repository<Showing>,
+    @InjectModel(Showing.name)
+    private readonly showingModel: Model<Showing>,
     @Inject(forwardRef(() => FilmsService))
     private readonly filmsService: FilmsService,
     @Inject(forwardRef(() => HallsService))
@@ -47,99 +60,98 @@ export class ShowingsService {
       throw new BadRequestException('startsAt must be in the future');
     }
 
-    const showing = await this.showingsRepository.save(
-      this.showingsRepository.create({
-        filmId: film.id,
-        hallId: hall.id,
-        startsAt,
-        price: dto.price,
-      }),
-    );
-    return this.toResponse({ ...showing, film, hall });
+    // The hall layout is expanded into the seats array once, at creation:
+    // every seat starts free (bookingId: null), bookings start empty.
+    const showing = await this.showingModel.create({
+      film: film._id,
+      hall: hall._id,
+      startsAt,
+      price: dto.price,
+      seats: this.hallsService
+        .getSeats(hall)
+        .map((seat) => ({ ...seat, bookingId: null })),
+      bookings: [],
+    });
+    await showing.populate<PopulatedShowing>(POPULATE_NAMES);
+    return ShowingResponseDto.from(showing as unknown as PopulatedShowing);
   }
 
   /**
-   * Filtering, sorting and paging are done by one database query:
-   * only the rows of the requested page are read, plus COUNT(*) for `total`.
+   * Filtering, sorting and paging are done by the database: only the documents
+   * of the requested page are read, plus countDocuments() for `total`.
    */
   async findAll(query: ShowingsQueryDto): Promise<ShowingsPageDto> {
     const { filmId, date, page, limit, sort } = query;
 
-    const qb = this.showingsRepository
-      .createQueryBuilder('showing')
-      .innerJoin('showing.film', 'film')
-      .addSelect(['film.id', 'film.title'])
-      .innerJoin('showing.hall', 'hall')
-      .addSelect(['hall.id', 'hall.name']);
-
+    const filter: QueryFilter<Showing> = {};
     if (filmId) {
-      qb.andWhere('showing.filmId = :filmId', { filmId });
+      filter.film = new Types.ObjectId(filmId);
     }
     if (date) {
       // Showings that start during this day (UTC): [date 00:00, next day 00:00).
       const from = new Date(`${date}T00:00:00.000Z`);
       const to = new Date(from.getTime() + DAY_MS);
-      qb.andWhere('showing.startsAt >= :from AND showing.startsAt < :to', {
-        from,
-        to,
-      });
+      filter.startsAt = { $gte: from, $lt: to };
     }
 
-    // Both joins are many-to-one (one film and one hall per showing), so the
-    // join never multiplies rows and plain OFFSET/LIMIT page the showings correctly.
-    const [showings, total] = await qb
-      .orderBy('showing.startsAt', sort === 'desc' ? 'DESC' : 'ASC')
-      .addOrderBy('showing.id', 'ASC')
-      .offset((page - 1) * limit)
-      .limit(limit)
-      .getManyAndCount();
+    const [showings, total] = await Promise.all([
+      this.showingModel
+        .find(filter, WITHOUT_ARRAYS)
+        .sort({ startsAt: sort === 'desc' ? -1 : 1, _id: 1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .populate<PopulatedShowing>(POPULATE_NAMES)
+        .lean<PopulatedShowing[]>(),
+      this.showingModel.countDocuments(filter),
+    ]);
 
     return {
-      items: showings.map((showing) => this.toResponse(showing)),
+      items: showings.map((showing) => ShowingResponseDto.from(showing)),
       total,
       page,
       limit,
     };
   }
 
-  /** Stored showing without relations; throws 404 when it does not exist. */
-  async findOne(id: string): Promise<Showing> {
-    const showing = await this.showingsRepository.findOneBy({ id });
+  async findOne(id: string): Promise<ShowingResponseDto> {
+    const showing = await this.showingModel
+      .findById(id, WITHOUT_ARRAYS)
+      .populate<PopulatedShowing>(POPULATE_NAMES)
+      .lean<PopulatedShowing>();
     if (!showing) {
-      throw new NotFoundException(`Showing with id "${id}" not found`);
+      throw this.notFound(id);
     }
-    return showing;
+    return ShowingResponseDto.from(showing);
   }
 
-  async findOneView(id: string): Promise<ShowingResponseDto> {
-    const showing = await this.showingsRepository.findOne({
-      where: { id },
-      relations: { film: true, hall: true },
-    });
+  /** Seat map of the showing: isBooked is derived from seats[].bookingId. */
+  async getSeats(id: string): Promise<SeatStateDto[]> {
+    const showing = await this.showingModel
+      .findById(id, { seats: 1 })
+      .lean<Pick<Showing, 'seats'>>();
     if (!showing) {
-      throw new NotFoundException(`Showing with id "${id}" not found`);
+      throw this.notFound(id);
     }
-    return this.toResponse(showing);
+    return showing.seats.map(({ row, seat, bookingId }) => ({
+      row,
+      seat,
+      isBooked: bookingId !== null,
+    }));
   }
 
   existsForFilm(filmId: string): Promise<boolean> {
-    return this.showingsRepository.existsBy({ filmId });
+    return this.exists({ film: new Types.ObjectId(filmId) });
   }
 
   existsForHall(hallId: string): Promise<boolean> {
-    return this.showingsRepository.existsBy({ hallId });
+    return this.exists({ hall: new Types.ObjectId(hallId) });
   }
 
-  private toResponse(showing: Showing): ShowingResponseDto {
-    if (!showing.film || !showing.hall) {
-      throw new Error(`Showing "${showing.id}" was loaded without film/hall`);
-    }
-    return {
-      id: showing.id,
-      film: { id: showing.film.id, title: showing.film.title },
-      hall: { id: showing.hall.id, name: showing.hall.name },
-      startsAt: showing.startsAt.toISOString(),
-      price: showing.price,
-    };
+  notFound(id: string): NotFoundException {
+    return new NotFoundException(`Showing with id "${id}" not found`);
+  }
+
+  private async exists(filter: QueryFilter<Showing>): Promise<boolean> {
+    return (await this.showingModel.exists(filter)) !== null;
   }
 }
