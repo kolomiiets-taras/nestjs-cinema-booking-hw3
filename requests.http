@@ -1,0 +1,439 @@
+### Cinema Booking API — перевірка всіх маршрутів і помилок.
+### Виконувати запити згори вниз (VS Code, розширення REST Client) на запущеному сервері
+### після `docker compose up -d` і `npm run migration:run`.
+### Ідентифікатори підставляються зі змінних — нічого копіювати вручну не потрібно.
+### Назви залів містять {{$timestamp}}, тож файл можна проганяти повторно на тій самій базі.
+### Кожна помилка повертається в єдиному форматі: { statusCode, message, path, timestamp }.
+
+@baseUrl = http://localhost:3000
+@missingId = 00000000-0000-4000-8000-000000000000
+@day = 2030-05-10
+
+########## ФІЛЬМИ ##########
+
+### Створити фільм -> 201
+# @name film
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "Dune: Part Two",
+  "durationMinutes": 166,
+  "releaseYear": 2024
+}
+
+### Створити другий фільм -> 201
+# @name film2
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "Arrival",
+  "durationMinutes": 116,
+  "releaseYear": 2016
+}
+
+### Фільм без обов'язкового поля -> 400
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "No duration",
+  "releaseYear": 2020
+}
+
+### Поле не того типу -> 400
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "Wrong type",
+  "durationMinutes": "ninety",
+  "releaseYear": 2020
+}
+
+### Список фільмів -> 200
+GET {{baseUrl}}/films
+
+### Фільм за id -> 200
+GET {{baseUrl}}/films/{{film.response.body.$.id}}
+
+### Неіснуючий фільм -> 404
+GET {{baseUrl}}/films/{{missingId}}
+
+### id не є UUID -> 400
+GET {{baseUrl}}/films/not-a-uuid
+
+### Оновити частину полів -> 200
+PATCH {{baseUrl}}/films/{{film.response.body.$.id}}
+Content-Type: application/json
+
+{
+  "durationMinutes": 167
+}
+
+### Оновлення з полем не того типу -> 400
+PATCH {{baseUrl}}/films/{{film.response.body.$.id}}
+Content-Type: application/json
+
+{
+  "releaseYear": "next year"
+}
+
+### Оновлення неіснуючого фільму -> 404
+PATCH {{baseUrl}}/films/{{missingId}}
+Content-Type: application/json
+
+{
+  "title": "Nobody"
+}
+
+########## ЗАЛИ ##########
+
+### Створити зал 3×5 -> 201
+# @name hall
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "Red Hall {{$timestamp}}",
+  "rows": 3,
+  "seatsPerRow": 5
+}
+
+### Зал з такою самою назвою -> 409
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "{{hall.response.body.$.name}}",
+  "rows": 2,
+  "seatsPerRow": 2
+}
+
+### Зал без назви -> 400
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "rows": 2,
+  "seatsPerRow": 2
+}
+
+### Кількість рядів не ціле додатне -> 400
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "Broken Hall",
+  "rows": 0,
+  "seatsPerRow": 2.5
+}
+
+### Список залів -> 200
+GET {{baseUrl}}/halls
+
+### Зал з переліком 15 місць -> 200
+GET {{baseUrl}}/halls/{{hall.response.body.$.id}}
+
+### Неіснуючий зал -> 404
+GET {{baseUrl}}/halls/{{missingId}}
+
+########## СЕАНСИ ##########
+
+### Сеанс 1: Dune, 18:00 -> 201
+# @name showing
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{film.response.body.$.id}}",
+  "hallId": "{{hall.response.body.$.id}}",
+  "startsAt": "{{day}}T18:00:00Z",
+  "price": 12500
+}
+
+### Сеанс 2: Arrival, 12:00 того ж дня -> 201
+# @name showing2
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{film2.response.body.$.id}}",
+  "hallId": "{{hall.response.body.$.id}}",
+  "startsAt": "{{day}}T12:00:00Z",
+  "price": 10000
+}
+
+### Сеанс 3: Dune, наступного дня -> 201
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{film.response.body.$.id}}",
+  "hallId": "{{hall.response.body.$.id}}",
+  "startsAt": "2030-05-11T10:00:00Z",
+  "price": 9000
+}
+
+### Неіснуючий фільм -> 400 (не 404)
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{missingId}}",
+  "hallId": "{{hall.response.body.$.id}}",
+  "startsAt": "{{day}}T20:00:00Z",
+  "price": 12500
+}
+
+### Неіснуючий зал -> 400 (не 404)
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{film.response.body.$.id}}",
+  "hallId": "{{missingId}}",
+  "startsAt": "{{day}}T20:00:00Z",
+  "price": 12500
+}
+
+### startsAt не у форматі ISO 8601 -> 400
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{film.response.body.$.id}}",
+  "hallId": "{{hall.response.body.$.id}}",
+  "startsAt": "10.05.2030 20:00",
+  "price": 12500
+}
+
+### startsAt у минулому -> 400
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{film.response.body.$.id}}",
+  "hallId": "{{hall.response.body.$.id}}",
+  "startsAt": "2020-01-01T20:00:00Z",
+  "price": 12500
+}
+
+### price не ціле додатне -> 400
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{film.response.body.$.id}}",
+  "hallId": "{{hall.response.body.$.id}}",
+  "startsAt": "{{day}}T20:00:00Z",
+  "price": -100
+}
+
+### Розклад: перша сторінка за зростанням startsAt -> 200, { items, total, page: 1, limit: 20 }
+GET {{baseUrl}}/showings
+
+### Розклад фільму -> 200 (сеанси лише цього фільму)
+GET {{baseUrl}}/showings?filmId={{film.response.body.$.id}}
+
+### Розклад на дату -> 200 (сеанси цієї доби за UTC, спершу 12:00)
+GET {{baseUrl}}/showings?date={{day}}
+
+### Фільтри разом -> 200
+GET {{baseUrl}}/showings?filmId={{film.response.body.$.id}}&date={{day}}
+
+### Посторінково: 1 сеанс на сторінці, друга сторінка -> 200, total не залежить від limit
+GET {{baseUrl}}/showings?filmId={{film.response.body.$.id}}&page=2&limit=1
+
+### Сортування за спаданням startsAt -> 200
+GET {{baseUrl}}/showings?sort=desc&limit=5
+
+### Усі параметри разом -> 200
+GET {{baseUrl}}/showings?filmId={{film.response.body.$.id}}&date={{day}}&page=1&limit=10&sort=desc
+
+### Сторінка за межами даних -> 200, items порожній
+GET {{baseUrl}}/showings?page=1000&limit=100
+
+### date не у форматі YYYY-MM-DD -> 400
+GET {{baseUrl}}/showings?date=10-05-2030
+
+### date — неіснуючий день -> 400
+GET {{baseUrl}}/showings?date=2030-02-30
+
+### page менше 1 -> 400
+GET {{baseUrl}}/showings?page=0
+
+### page не ціле число -> 400
+GET {{baseUrl}}/showings?page=abc
+
+### limit більше 100 -> 400
+GET {{baseUrl}}/showings?limit=101
+
+### limit менше 1 -> 400
+GET {{baseUrl}}/showings?limit=0
+
+### limit не ціле число -> 400
+GET {{baseUrl}}/showings?limit=2.5
+
+### sort не asc/desc -> 400
+GET {{baseUrl}}/showings?sort=newest
+
+### Сеанс за id з назвами фільму й залу -> 200
+GET {{baseUrl}}/showings/{{showing.response.body.$.id}}
+
+### Неіснуючий сеанс -> 404
+GET {{baseUrl}}/showings/{{missingId}}
+
+### Карта місць сеансу (усі вільні) -> 200
+GET {{baseUrl}}/showings/{{showing.response.body.$.id}}/seats
+
+### Карта місць неіснуючого сеансу -> 404
+GET {{baseUrl}}/showings/{{missingId}}/seats
+
+########## БРОНЮВАННЯ ##########
+
+### Забронювати 2 місця -> 201, totalPrice = 25000
+# @name booking
+POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [
+    { "row": 2, "seat": 3 },
+    { "row": 2, "seat": 4 }
+  ]
+}
+
+### Бронювання на неіснуючий сеанс -> 404
+POST {{baseUrl}}/showings/{{missingId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 1, "seat": 1 }]
+}
+
+### Порожній масив місць -> 400
+POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+Content-Type: application/json
+
+{
+  "seats": []
+}
+
+### Елемент без обох чисел -> 400
+POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 1 }]
+}
+
+### Місце повторюється в масиві -> 400
+POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [
+    { "row": 1, "seat": 1 },
+    { "row": 1, "seat": 1 }
+  ]
+}
+
+### Місця немає в залі (ряд 9 у залі з 3 рядів) -> 400
+POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 9, "seat": 1 }]
+}
+
+### Номер місця не ціле додатне -> 400
+POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 1, "seat": 0 }]
+}
+
+### Одне з місць уже зайняте -> 409, місце 1-1 НЕ бронюється (транзакція відкочується)
+POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [
+    { "row": 1, "seat": 1 },
+    { "row": 2, "seat": 3 }
+  ]
+}
+
+### Карта місць: зайняті лише 2-3 і 2-4 -> 200
+GET {{baseUrl}}/showings/{{showing.response.body.$.id}}/seats
+
+### Усі бронювання -> 200
+GET {{baseUrl}}/bookings
+
+### Бронювання сеансу -> 200
+GET {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+
+### Бронювання неіснуючого сеансу -> 404
+GET {{baseUrl}}/showings/{{missingId}}/bookings
+
+########## ВИДАЛЕННЯ ##########
+
+### Видалити фільм, для якого є сеанси -> 409 з поясненням (каскаду немає)
+DELETE {{baseUrl}}/films/{{film.response.body.$.id}}
+
+### Видалити зал, у якому є сеанси -> 409 з поясненням (каскаду немає)
+DELETE {{baseUrl}}/halls/{{hall.response.body.$.id}}
+
+### Скасувати бронювання -> 204, рядки booking_seats видаляються каскадно
+DELETE {{baseUrl}}/bookings/{{booking.response.body.$.id}}
+
+### Повторне скасування -> 404
+DELETE {{baseUrl}}/bookings/{{booking.response.body.$.id}}
+
+### Карта місць: усі вільні -> 200
+GET {{baseUrl}}/showings/{{showing.response.body.$.id}}/seats
+
+### Звільнені місця можна забронювати знову -> 201
+POST {{baseUrl}}/showings/{{showing.response.body.$.id}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 2, "seat": 3 }]
+}
+
+### Видалити неіснуючий фільм -> 404
+DELETE {{baseUrl}}/films/{{missingId}}
+
+### Видалити неіснуючий зал -> 404
+DELETE {{baseUrl}}/halls/{{missingId}}
+
+### Тимчасовий фільм без сеансів -> 201
+# @name tempFilm
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "Temporary",
+  "durationMinutes": 90,
+  "releaseYear": 2020
+}
+
+### Фільм без сеансів можна видалити -> 204
+DELETE {{baseUrl}}/films/{{tempFilm.response.body.$.id}}
+
+### Тимчасовий зал без сеансів -> 201
+# @name tempHall
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "Temporary Hall {{$timestamp}}",
+  "rows": 1,
+  "seatsPerRow": 1
+}
+
+### Зал без сеансів можна видалити -> 204
+DELETE {{baseUrl}}/halls/{{tempHall.response.body.$.id}}
